@@ -6,11 +6,6 @@ RESULT_DIR="/tmp/lscwp-setup-$$"
 RAM_PER_JOB_MB=200
 WP_TIMEOUT=30
 
-# ====================================
-# รองรับ /home และ /home2
-# ====================================
-HOME_DIRS=(/home /home2)
-
 log() {
     local DATE=$(date '+%Y-%m-%d %H:%M:%S')
     echo "$1"
@@ -52,6 +47,95 @@ if [ "$REDIS_PING" != "PONG" ]; then
 fi
 
 # ====================================
+# สแกน cPanel Accounts
+# ====================================
+log "======================================"
+log " PRE-SCAN: กำลังสแกน cPanel Accounts..."
+log "======================================"
+
+CPANEL_USERS_HOME1=()
+CPANEL_USERS_HOME2=()
+CPANEL_USERS_BOTH=()    # มีทั้ง /home และ /home2
+CPANEL_USERS_ALL=()     # รวมทุก account
+
+# ดึง list จาก /etc/trueuserdomains หรือ /etc/passwd (เฉพาะ cPanel users)
+# วิธีที่แม่นที่สุดคืออ่านจาก /var/cpanel/users/ หรือ /etc/trueuserdomains
+if [ -d "/var/cpanel/users" ]; then
+    CPANEL_SOURCE="cpanel_dir"
+    RAW_USERS=$(ls /var/cpanel/users/ 2>/dev/null | grep -v "^root$")
+elif [ -f "/etc/trueuserdomains" ]; then
+    CPANEL_SOURCE="trueuserdomains"
+    RAW_USERS=$(awk '{print $NF}' /etc/trueuserdomains 2>/dev/null | sort -u | grep -v "^root$")
+else
+    CPANEL_SOURCE="passwd"
+    RAW_USERS=$(awk -F: '$3 >= 500 && $3 < 65534 && $1 != "nobody" {print $1}' /etc/passwd 2>/dev/null | grep -v "^root$")
+fi
+
+log " แหล่งข้อมูล cPanel : $CPANEL_SOURCE"
+
+for user in $RAW_USERS; do
+    IN_HOME1=false
+    IN_HOME2=false
+
+    [ -d "/home/${user}" ]  && IN_HOME1=true
+    [ -d "/home2/${user}" ] && IN_HOME2=true
+
+    if $IN_HOME1 || $IN_HOME2; then
+        CPANEL_USERS_ALL+=("$user")
+    fi
+
+    if $IN_HOME1 && $IN_HOME2; then
+        CPANEL_USERS_BOTH+=("$user")
+    elif $IN_HOME1; then
+        CPANEL_USERS_HOME1+=("$user")
+    elif $IN_HOME2; then
+        CPANEL_USERS_HOME2+=("$user")
+    fi
+done
+
+TOTAL_ACCOUNTS=${#CPANEL_USERS_ALL[@]}
+COUNT_HOME1=${#CPANEL_USERS_HOME1[@]}
+COUNT_HOME2=${#CPANEL_USERS_HOME2[@]}
+COUNT_BOTH=${#CPANEL_USERS_BOTH[@]}
+
+log "--------------------------------------"
+log " ผลสแกน cPanel Accounts"
+log "--------------------------------------"
+log " 👥 รวม cPanel Accounts ทั้งหมด : $TOTAL_ACCOUNTS accounts"
+log " 📁 อยู่ใน /home เท่านั้น        : $COUNT_HOME1 accounts"
+log " 📁 อยู่ใน /home2 เท่านั้น       : $COUNT_HOME2 accounts"
+log " 📁 อยู่ทั้ง /home และ /home2    : $COUNT_BOTH accounts"
+log "--------------------------------------"
+
+if [ "$COUNT_HOME1" -gt 0 ]; then
+    log " 📂 Accounts ใน /home:"
+    for u in "${CPANEL_USERS_HOME1[@]}"; do
+        log "    - $u"
+    done
+fi
+
+if [ "$COUNT_HOME2" -gt 0 ]; then
+    log " 📂 Accounts ใน /home2:"
+    for u in "${CPANEL_USERS_HOME2[@]}"; do
+        log "    - $u"
+    done
+fi
+
+if [ "$COUNT_BOTH" -gt 0 ]; then
+    log " 📂 Accounts ที่อยู่ทั้ง /home และ /home2:"
+    for u in "${CPANEL_USERS_BOTH[@]}"; do
+        log "    - $u"
+    done
+fi
+
+log "======================================"
+
+if [ "$TOTAL_ACCOUNTS" -eq 0 ]; then
+    log "⚠️  WARNING: ไม่พบ cPanel accounts ใน /home หรือ /home2"
+    log "   กรุณาตรวจสอบว่าเซิร์ฟเวอร์นี้ใช้ cPanel จริงหรือไม่"
+fi
+
+# ====================================
 # คำนวณ MAX_JOBS อัตโนมัติ
 # ====================================
 CPU_CORES=$(nproc)
@@ -67,16 +151,6 @@ fi
 [ "$MAX_JOBS" -lt 1 ] && MAX_JOBS=1
 [ "$MAX_JOBS" -gt 20 ] && MAX_JOBS=20
 
-# ====================================
-# แสดง home directories ที่พบ
-# ====================================
-FOUND_HOMES=()
-for base in "${HOME_DIRS[@]}"; do
-    if [ -d "$base" ]; then
-        FOUND_HOMES+=("$base")
-    fi
-done
-
 log "======================================"
 log " LITESPEED OBJECT CACHE SETUP"
 log " เริ่มเวลา      : $(date '+%Y-%m-%d %H:%M:%S')"
@@ -85,129 +159,37 @@ log " Total RAM     : $TOTAL_RAM_MB MB"
 log " Auto MAX_JOBS : $MAX_JOBS"
 log " Redis Status  : ✅ PONG"
 log " WP-CLI        : ✅ $(wp --version --allow-root 2>/dev/null)"
-log " Home Dirs     : ${FOUND_HOMES[*]}"
 log "======================================"
 
-# ============================================================
-# DISCOVERY: กวาดหา cPanel users + WordPress ทั้งหมด
-# แสดงรายงานก่อนเริ่มทำงาน
-# ============================================================
-log ""
-log "======================================"
-log " DISCOVERY: กำลังสแกนหา cPanel Users..."
-log "======================================"
-
-# เก็บข้อมูลรวม
+# ====================================
+# หา WordPress ทั้งหมด (รองรับ /home และ /home2)
+# ====================================
 DIRS=()
-TOTAL_CPANEL_USERS=0
-TOTAL_WP_SITES=0
 
-# ใช้ associative array เก็บจำนวนเว็บต่อ user
-declare -A USER_WP_COUNT
-declare -A USER_HOME_BASE
-declare -A USER_WP_SITES
+# สแกนจาก /home
+for dir in /home/*/public_html/*/; do
+    if [ -f "${dir}wp-config.php" ]; then
+        DIRS+=("$dir")
+    fi
+done
 
-for base in "${HOME_DIRS[@]}"; do
-    [ -d "$base" ] || continue
-
-    USERS_IN_BASE=0
-
-    for userhome in "${base}"/*/; do
-        [ -d "$userhome" ] || continue
-        [ -d "${userhome}public_html" ] || continue
-
-        USERNAME=$(basename "$userhome")
-
-        # ข้าม system directories ที่ไม่ใช่ cPanel user
-        case "$USERNAME" in
-            cPanel|virtfs|cpeasyapache|softaculous|.cpan) continue ;;
-        esac
-
-        # หา WordPress ทั้งหมดใน user นี้
-        WP_COUNT=0
-        WP_LIST=""
-
-        while IFS= read -r wpconfig; do
-            WPDIR=$(dirname "$wpconfig")
-            DIRS+=("${WPDIR}/")
-
-            SUBDIR=${WPDIR#*public_html/}
-            SUBDIR=${SUBDIR%/}
-            [ "$SUBDIR" = "$WPDIR" ] && SUBDIR="main"  # ถ้าอยู่ตรง public_html
-
-            if [ -n "$WP_LIST" ]; then
-                WP_LIST="${WP_LIST}, ${SUBDIR:-main}"
-            else
-                WP_LIST="${SUBDIR:-main}"
-            fi
-
-            ((WP_COUNT++))
-        done < <(find "${userhome}public_html" -name "wp-config.php" \
-            -not -path "*/wp-content/*" \
-            -not -path "*/wp-includes/*" \
-            -not -path "*/backup*/*" \
-            -not -path "*/cache/*" \
-            -not -path "*/tmp/*" \
-            -not -path "*/.trash/*" \
-            -not -path "*/node_modules/*" \
-            2>/dev/null)
-
-        if [ "$WP_COUNT" -gt 0 ]; then
-            USER_WP_COUNT["$USERNAME"]=$WP_COUNT
-            USER_HOME_BASE["$USERNAME"]=$base
-            USER_WP_SITES["$USERNAME"]=$WP_LIST
-            ((TOTAL_CPANEL_USERS++))
-            TOTAL_WP_SITES=$((TOTAL_WP_SITES + WP_COUNT))
-            ((USERS_IN_BASE++))
+# สแกนจาก /home2 (ถ้ามี)
+if [ -d "/home2" ]; then
+    for dir in /home2/*/public_html/*/; do
+        if [ -f "${dir}wp-config.php" ]; then
+            DIRS+=("$dir")
         fi
     done
-
-    log " 📂 $base : พบ $USERS_IN_BASE cPanel users ที่มี WordPress"
-done
-
-log ""
-log "======================================"
-log " สรุปผล DISCOVERY"
-log " cPanel Users (มี WP) : $TOTAL_CPANEL_USERS users"
-log " WordPress ทั้งหมด     : $TOTAL_WP_SITES เว็บ"
-log "======================================"
-log ""
-
-# ====================================
-# แสดงรายละเอียดแต่ละ cPanel user
-# ====================================
-log "--------------------------------------"
-log " รายละเอียด cPanel Users"
-log "--------------------------------------"
-
-# เรียงตามชื่อ user
-SORTED_USERS=($(echo "${!USER_WP_COUNT[@]}" | tr ' ' '\n' | sort))
-
-INDEX=1
-for user in "${SORTED_USERS[@]}"; do
-    log " $INDEX) $user"
-    log "    Home     : ${USER_HOME_BASE[$user]}"
-    log "    WP Sites : ${USER_WP_COUNT[$user]} เว็บ"
-    log "    Sites    : ${USER_WP_SITES[$user]}"
-    ((INDEX++))
-done
-
-log "--------------------------------------"
-log ""
+fi
 
 TOTAL=${#DIRS[@]}
-
-if [ "$TOTAL" -eq 0 ]; then
-    log "ไม่พบเว็บ WordPress ใดๆ ในระบบ"
-    exit 0
-fi
+log "พบ WordPress ทั้งหมด: $TOTAL เว็บ (จาก $TOTAL_ACCOUNTS cPanel accounts)"
+log "======================================"
 
 # ====================================
 # PHASE 1: Check
 # ====================================
-log "======================================"
 log " PHASE 1: กำลังตรวจสอบค่าปัจจุบัน..."
-log " ตรวจสอบ $TOTAL เว็บ จาก $TOTAL_CPANEL_USERS cPanel users"
 log "======================================"
 
 check_site() {
@@ -216,14 +198,17 @@ check_site() {
     local LOCK_FILE="$3"
     local RESULT_DIR="$4"
     local WP_TIMEOUT="$5"
-    local UNIQUE="${BASHPID}_$(date +%s%N)"
 
-    # ดึงชื่อ SITE แบบยืดหยุ่น (รองรับทุก /home* และทุก level)
-    local AFTER_HOME=${dir#/home*/}
-    local USERNAME=${AFTER_HOME%%/*}
-    local SUBDIR=${dir#*public_html/}
-    SUBDIR=${SUBDIR%/}
-    local SITE="${USERNAME}/${SUBDIR:-main}"
+    # รองรับทั้ง /home และ /home2 (field 3 หรือ 4 ของ path)
+    local BASE=$(echo "$dir" | cut -d'/' -f2)   # home หรือ home2
+    if [ "$BASE" = "home2" ]; then
+        local SITE=$(echo "$dir" | awk -F'/' '{print $3"/"$5}')
+    else
+        local SITE=$(echo "$dir" | awk -F'/' '{print $3"/"$5}')
+    fi
+    SITE="[$BASE] $SITE"
+
+    local UNIQUE="${BASHPID}_$(date +%s%N)"
 
     _log() {
         local DATE=$(date '+%Y-%m-%d %H:%M:%S')
@@ -236,13 +221,13 @@ check_site() {
     }
 
     if ! _wp plugin is-installed litespeed-cache; then
-        _log "⏭  NO LITESPEED: $SITE ($dir)"
+        _log "⏭  NO LITESPEED: $SITE"
         touch "${RESULT_DIR}/check/noplugin_${UNIQUE}"
         return
     fi
 
     if ! _wp plugin is-active litespeed-cache; then
-        _log "⏭  INACTIVE: $SITE ($dir)"
+        _log "⏭  INACTIVE: $SITE"
         touch "${RESULT_DIR}/check/inactive_${UNIQUE}"
         return
     fi
@@ -304,7 +289,6 @@ fi
 # ====================================
 # PHASE 2: Setup
 # ====================================
-log "======================================"
 log " PHASE 2: กำลังแก้ไข $NEEDSFIX เว็บ..."
 log "======================================"
 
@@ -314,14 +298,12 @@ fix_site() {
     local LOCK_FILE="$3"
     local RESULT_DIR="$4"
     local WP_TIMEOUT="$5"
-    local UNIQUE="${BASHPID}_$(date +%s%N)"
 
-    # ดึงชื่อ SITE แบบยืดหยุ่น (รองรับทุก /home* และทุก level)
-    local AFTER_HOME=${dir#/home*/}
-    local USERNAME=${AFTER_HOME%%/*}
-    local SUBDIR=${dir#*public_html/}
-    SUBDIR=${SUBDIR%/}
-    local SITE="${USERNAME}/${SUBDIR:-main}"
+    local BASE=$(echo "$dir" | cut -d'/' -f2)
+    local SITE=$(echo "$dir" | awk -F'/' '{print $3"/"$5}')
+    SITE="[$BASE] $SITE"
+
+    local UNIQUE="${BASHPID}_$(date +%s%N)"
 
     _log() {
         local DATE=$(date '+%Y-%m-%d %H:%M:%S')
@@ -345,7 +327,7 @@ fix_site() {
     _wp litespeed-option set object-pswd " " || FAILED=1
 
     if [ "$FAILED" -eq 1 ]; then
-        _log "❌ FAILED (Set Error): $SITE ($dir)"
+        _log "❌ FAILED (Set Error): $SITE"
         touch "${RESULT_DIR}/fix/failed_${UNIQUE}"
         return
     fi
@@ -375,11 +357,13 @@ FAILED=$(find "$RESULT_DIR/fix" -name "failed_*" 2>/dev/null | wc -l)
 
 log "======================================"
 log " สรุปผลรวม"
-log " รวมทั้งหมด         : $TOTAL เว็บ"
-log " ✅ ถูกต้องอยู่แล้ว  : $CORRECT เว็บ"
-log " ✅ Set สำเร็จ       : $SUCCESS เว็บ"
-log " ❌ Set ไม่สำเร็จ    : $FAILED เว็บ"
-log " ⏭  ข้ามทั้งหมด      : $SKIPPED เว็บ"
-log " เวลาที่ใช้          : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
-log " ✅ รัน verify ต่อด้วย: verify-object-cache.sh"
+log " 👥 cPanel Accounts    : $TOTAL_ACCOUNTS accounts"
+log "    /home              : $COUNT_HOME1 | /home2: $COUNT_HOME2 | ทั้งคู่: $COUNT_BOTH"
+log " รวมทั้งหมด            : $TOTAL เว็บ"
+log " ✅ ถูกต้องอยู่แล้ว   : $CORRECT เว็บ"
+log " ✅ Set สำเร็จ          : $SUCCESS เว็บ"
+log " ❌ Set ไม่สำเร็จ       : $FAILED เว็บ"
+log " ⏭  ข้ามทั้งหมด         : $SKIPPED เว็บ"
+log " เวลาที่ใช้             : $(( ELAPSED / 60 )) นาที $(( ELAPSED % 60 )) วินาที"
+log " ✅ รัน verify ต่อด้วย  : verify-object-cache.sh"
 log "======================================"
