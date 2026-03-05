@@ -199,35 +199,50 @@ log "======================================"
 # ====================================
 DIRS=()
 
-# เก็บ real path ที่เคย add แล้ว เพื่อป้องกัน symlink ซ้ำ
-declare -A SEEN_DIRS
+# ====================================
+# สแกนหา WordPress ทุกเว็บบนเซิร์ฟเวอร์
+# - ใช้ find ล้วนๆ ไม่มี glob limit
+# - ข้าม wp-config.php ที่อยู่ตรง public_html root (main domain)
+# - dedup ด้วย real path ป้องกัน symlink นับซ้ำ
+# ====================================
+declare -A SEEN_REAL
 
-scan_wordpress_in() {
-    local base="$1"   # /home หรือ /home2
+scan_all_wordpress() {
+    local base="$1"
     [ ! -d "$base" ] && return
 
-    for user_dir in "${base}"/*/; do
-        local user=$(basename "$user_dir")
+    # หา public_html ทุกอันใน base ที่ไม่ใช่ dir ใน SKIP_DIRS
+    while IFS= read -r pub; do
+        # ดึง username จาก path: /home[2]/USER/public_html
+        local user
+        user=$(echo "$pub" | awk -F'/' '{print $3}')
+        # ข้าม system dirs
         echo "$user" | grep -qE "^(${SKIP_DIRS})$" && continue
-        [ ! -d "${user_dir}public_html" ] && continue
 
-        local pub="${user_dir}public_html"
-
+        # หา wp-config.php ทุกอัน ลึกได้ถึง 10 ชั้น
+        # exclude ไฟล์ที่อยู่ตรง public_html เอง (-mindepth 2 จาก public_html)
         while IFS= read -r wpconfig; do
-            local site_dir="$(dirname "$wpconfig")/"
-            # resolve symlink → real path เพื่อป้องกันนับซ้ำ
+            local site_dir
+            site_dir="$(dirname "$wpconfig")/"
+
+            # dedup ด้วย real path
             local real_dir
-            real_dir=$(realpath "$site_dir" 2>/dev/null || echo "$site_dir")
-            if [ -z "${SEEN_DIRS[$real_dir]+_}" ]; then
-                SEEN_DIRS[$real_dir]=1
-                DIRS+=("$site_dir")
-            fi
-        done < <(find "$pub" -mindepth 2 -maxdepth 3 -name "wp-config.php" 2>/dev/null)
-    done
+            real_dir=$(realpath -s "$site_dir" 2>/dev/null || echo "$site_dir")
+            [ -n "${SEEN_REAL[$real_dir]+_}" ] && continue
+            SEEN_REAL[$real_dir]=1
+
+            DIRS+=("$site_dir")
+        done < <(find "$pub" -mindepth 2 -maxdepth 10 \
+                    -name "wp-config.php" \
+                    -not -path "*/wp-content/*" \
+                    -not -path "*/node_modules/*" \
+                    -not -path "*/.git/*" \
+                    2>/dev/null)
+    done < <(find "$base" -mindepth 2 -maxdepth 2 -name "public_html" -type d 2>/dev/null)
 }
 
-scan_wordpress_in "/home"
-scan_wordpress_in "/home2"
+scan_all_wordpress "/home"
+scan_all_wordpress "/home2"
 
 # ตรวจสอบเบื้องต้นว่ามี WordPress อย่างน้อย 1 เว็บ
 if [ "${#DIRS[@]}" -eq 0 ]; then
