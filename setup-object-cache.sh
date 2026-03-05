@@ -199,6 +199,9 @@ log "======================================"
 # ====================================
 DIRS=()
 
+# เก็บ real path ที่เคย add แล้ว เพื่อป้องกัน symlink ซ้ำ
+declare -A SEEN_DIRS
+
 scan_wordpress_in() {
     local base="$1"   # /home หรือ /home2
     [ ! -d "$base" ] && return
@@ -210,11 +213,15 @@ scan_wordpress_in() {
 
         local pub="${user_dir}public_html"
 
-        # ใช้ find เพื่อหา wp-config.php ใน addon domains (subdirectory ของ public_html)
-        # -mindepth 2 = ข้าม public_html/wp-config.php (main domain) ตามที่ต้องการ
-        # -maxdepth 3 = รองรับ public_html/domain/ และ public_html/domain/subdir/
         while IFS= read -r wpconfig; do
-            DIRS+=("$(dirname "$wpconfig")/")
+            local site_dir="$(dirname "$wpconfig")/"
+            # resolve symlink → real path เพื่อป้องกันนับซ้ำ
+            local real_dir
+            real_dir=$(realpath "$site_dir" 2>/dev/null || echo "$site_dir")
+            if [ -z "${SEEN_DIRS[$real_dir]+_}" ]; then
+                SEEN_DIRS[$real_dir]=1
+                DIRS+=("$site_dir")
+            fi
         done < <(find "$pub" -mindepth 2 -maxdepth 3 -name "wp-config.php" 2>/dev/null)
     done
 }
@@ -222,11 +229,8 @@ scan_wordpress_in() {
 scan_wordpress_in "/home"
 scan_wordpress_in "/home2"
 
-TOTAL=${#DIRS[@]}
-log "พบ WordPress ทั้งหมด: $TOTAL เว็บ (จาก $TOTAL_ACCOUNTS cPanel accounts)"
-log "======================================"
-
-if [ "$TOTAL" -eq 0 ]; then
+# ตรวจสอบเบื้องต้นว่ามี WordPress อย่างน้อย 1 เว็บ
+if [ "${#DIRS[@]}" -eq 0 ]; then
     log "⚠️  ไม่พบ WordPress เลย หยุดการทำงาน"
     exit 0
 fi
@@ -408,7 +412,7 @@ log " สรุปผลรวม"
 log " 👥 cPanel Accounts    : $TOTAL_ACCOUNTS accounts"
 log "    /home  : $COUNT_HOME1 | /home2 : $COUNT_HOME2 | ทั้งคู่ : $COUNT_BOTH"
 log "--------------------------------------"
-log " รวม WordPress          : $TOTAL เว็บ"
+log " รวม WordPress          : $(( CORRECT + FIXED + FAILED + SKIPPED )) เว็บ (นับจากผลจริง)"
 log " ✅ ถูกต้องอยู่แล้ว    : $CORRECT เว็บ"
 log " ✅ แก้ไขสำเร็จ         : $FIXED เว็บ"
 log " ❌ แก้ไขไม่สำเร็จ      : $FAILED เว็บ"
