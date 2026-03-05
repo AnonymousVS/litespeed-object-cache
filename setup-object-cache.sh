@@ -286,11 +286,20 @@ process_site() {
     local CUR_USER; CUR_USER=$(_clean "$(_wp_get litespeed-option get object-user)")
     local CUR_PSWD; CUR_PSWD=$(_clean "$(_wp_get litespeed-option get object-pswd)")
 
+    # port: litespeed เก็บ socket-port เป็น '' หรือ '0' ถือว่าเหมือนกัน
+    [ -z "$CUR_PORT" ] && CUR_PORT="0"
+
+    # object: litespeed บางครั้ง return '' แทน '0' เมื่อยังไม่ได้ set
+    [ -z "$CUR_OBJ"  ] && CUR_OBJ="0"
+
+    # kind: default เป็น memcached (0) ถ้า empty
+    [ -z "$CUR_KIND" ] && CUR_KIND="0"
+
     # --- เช็คทีละ field เฉพาะที่ผิดจริง ---
     local NEED_FIX=()
 
-    # object cache ON/OFF — ถ้า ON อยู่แล้วข้ามเงียบๆ
-    [ "$CUR_OBJ" != "1" ] && NEED_FIX+=("object")
+    # object cache ON/OFF — ถ้า ON (1) อยู่แล้วข้ามเงียบๆ
+    [ "$CUR_OBJ"  != "1" ] && NEED_FIX+=("object")
 
     # method — ถ้า Redis (1) อยู่แล้วข้ามเงียบๆ
     [ "$CUR_KIND" != "1" ] && NEED_FIX+=("object-kind")
@@ -298,7 +307,7 @@ process_site() {
     # host — ถ้าตรงอยู่แล้วข้ามเงียบๆ
     [ "$CUR_HOST" != "/var/run/redis/redis.sock" ] && NEED_FIX+=("object-host")
 
-    # port — ถ้า 0 อยู่แล้วข้ามเงียบๆ
+    # port — '' และ '0' ถือว่าถูกต้องทั้งคู่ (normalize แล้วข้างบน)
     [ "$CUR_PORT" != "0" ] && NEED_FIX+=("object-port")
 
     # user/password — ถ้าว่างอยู่แล้วไม่ต้องแจ้ง ไม่ต้องทำอะไร
